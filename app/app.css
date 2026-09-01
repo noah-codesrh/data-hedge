@@ -1,15 +1,36 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: Onest;
+  src: url("/assets/Font/Onest/Onest-VariableFont_wght.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif,
-    "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --font-sans: "Onest", ui-sans-serif, system-ui, sans-serif;
+
+  --color-bg: #141414;
+  --color-card: #252525;
+  --color-card-2: #1c1c1c;
+  --color-line: #333333;
+  --color-gold: #f1d65a;
+  --color-gold-soft: #f7e08a;
+  --color-muted: #8a8a8a;
+  --color-up: #34d399;
+  --color-down: #f26d5b;
 }
 
 html,
 body {
-  @apply bg-white dark:bg-gray-950;
+  @apply bg-bg text-white font-sans;
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+  scrollbar-width: none;
+}
 
-  @media (prefers-color-scheme: dark) {
-    color-scheme: dark;
-  }
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  display: none;
 }

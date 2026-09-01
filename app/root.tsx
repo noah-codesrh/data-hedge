@@ -8,18 +8,22 @@ import {
 } from "react-router";
 
 import type { Route } from "./+types/root";
+import { Nav } from "./components/Nav";
 import "./app.css";
 
 export const links: Route.LinksFunction = () => [
-  { rel: "preconnect", href: "https://fonts.googleapis.com" },
+  { rel: "icon", href: "/logo-mark.svg", type: "image/svg+xml" },
   {
-    rel: "preconnect",
-    href: "https://fonts.gstatic.com",
-    crossOrigin: "anonymous",
+    rel: "preload",
+    href: "/logo-full.png",
+    as: "image",
   },
   {
-    rel: "stylesheet",
-    href: "https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap",
+    rel: "preload",
+    href: "/assets/Font/Onest/Onest-VariableFont_wght.ttf",
+    as: "font",
+    type: "font/ttf",
+    crossOrigin: "anonymous",
   },
 ];
 
@@ -33,6 +37,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <Links />
       </head>
       <body>
+        <Nav />
         {children}
         <ScrollRestoration />
         <Scripts />
@@ -46,7 +51,7 @@ export default function App() {
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
-  let message = "Oops!";
+  let message = "Error";
   let details = "An unexpected error occurred.";
   let stack: string | undefined;
 
@@ -62,14 +67,14 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   }
 
   return (
-    <main className="pt-16 p-4 container mx-auto">
-      <h1>{message}</h1>
-      <p>{details}</p>
-      {stack && (
-        <pre className="w-full p-4 overflow-x-auto">
+    <main className="mx-auto max-w-3xl px-4 py-16 text-sm">
+      <h1 className="text-3xl font-bold text-white">{message}</h1>
+      <p className="mt-2 text-muted">{details}</p>
+      {stack ? (
+        <pre className="mt-6 overflow-x-auto text-[11px] text-muted">
           <code>{stack}</code>
         </pre>
-      )}
+      ) : null}
     </main>
   );
 }
