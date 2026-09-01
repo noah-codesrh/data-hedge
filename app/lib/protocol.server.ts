@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createPublicClient, fallback, http, type Hex } from "viem";
 import { LEVERAGE_MARKETS } from "./leverage-markets";
@@ -52,6 +55,34 @@ type Cache = { at: number; body: ProtocolData };
 let cache: Cache | null = null;
 const CACHE_MS = 20_000;
 let db: SupabaseClient | null | undefined;
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+function applyEnvFile(file: string) {
+  if (!existsSync(file)) return;
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] == null || process.env[key] === "") {
+      process.env[key] = value;
+    }
+  }
+}
+
+applyEnvFile(path.resolve(process.cwd(), ".env"));
+applyEnvFile(path.resolve(here, "../../.env"));
+applyEnvFile(path.resolve(process.cwd(), "../frontend/.env"));
+applyEnvFile(path.resolve(here, "../../../frontend/.env"));
 
 function env(name: string) {
   const value = process.env[name]?.trim();
@@ -147,27 +178,31 @@ async function loadPrivyUsers() {
   return { count, byDay };
 }
 
-async function loadUsersAndVolume() {
-  const empty = {
-    users: 0,
-    volume: VOLUME_SHOWN,
-    requests: 0,
-    userSeries: fillDaily(new Map(), 30, "carry"),
-    volumeSeries: risingTo(fillRange(new Map(), LAUNCH_DAY), VOLUME_SHOWN),
-    requestSeries: fillDaily(new Map(), 30),
-  };
+async function loadSupabaseUsers() {
   const client = supabaseAdmin();
-  const [privy, profiles, trades] = await Promise.all([
+  if (!client) return { count: 0, byDay: new Map<string, number>() };
+
+  const { data, count, error } = await client
+    .from("profiles")
+    .select("created_at", { count: "exact" });
+  if (error) return { count: 0, byDay: new Map<string, number>() };
+
+  const people = (data ?? []) as { created_at: string }[];
+  const byDay = new Map<string, number>();
+  for (const row of people) addDay(byDay, dayKey(row.created_at));
+  return { count: count ?? people.length, byDay };
+}
+
+async function loadUsersAndVolume() {
+  const client = supabaseAdmin();
+  const [privy, supabaseUsers, trades] = await Promise.all([
     loadPrivyUsers(),
-    client
-      ? client.from("profiles").select("created_at")
-      : Promise.resolve({ data: [] }),
+    loadSupabaseUsers(),
     client
       ? client.from("trades").select("usdg, direction, created_at").limit(20_000)
-      : Promise.resolve({ data: [] }),
+      : Promise.resolve({ data: [] as { usdg?: unknown; created_at?: string }[] }),
   ]);
 
-  const people = (profiles.data ?? []) as { created_at: string }[];
   const rows = (trades.data ?? []) as {
     usdg: number | string;
     direction: string;
@@ -175,7 +210,9 @@ async function loadUsersAndVolume() {
   }[];
 
   const usersByDay = new Map<string, number>(privy.byDay);
-  for (const row of people) addDay(usersByDay, dayKey(row.created_at));
+  for (const [key, value] of supabaseUsers.byDay) {
+    usersByDay.set(key, (usersByDay.get(key) ?? 0) + value);
+  }
 
   let runningUsers = 0;
   const userCumulative = new Map<string, number>();
@@ -184,7 +221,8 @@ async function loadUsersAndVolume() {
     userCumulative.set(key, runningUsers);
   }
 
-  const users = privy.count + people.length;
+  const users = privy.count + supabaseUsers.count;
+  const shown = users * USERS_MULT;
   const volumeByDay = new Map<string, number>();
   const requestsByDay = new Map<string, number>();
   for (const row of rows) {
@@ -194,11 +232,19 @@ async function loadUsersAndVolume() {
     requestsByDay.set(key, (requestsByDay.get(key) ?? 0) + 1);
   }
 
+  const userSeries = scaleSeries(fillDaily(userCumulative, 30, "carry"), USERS_MULT);
+  if (userSeries.length > 0) {
+    userSeries[userSeries.length - 1] = {
+      t: userSeries[userSeries.length - 1].t,
+      v: shown,
+    };
+  }
+
   return {
     users,
     volume: VOLUME_SHOWN,
     requests: rows.length,
-    userSeries: scaleSeries(fillDaily(userCumulative, 30, "carry"), USERS_MULT),
+    userSeries,
     volumeSeries: risingTo(fillRange(volumeByDay, LAUNCH_DAY), VOLUME_SHOWN),
     requestSeries: fillDaily(requestsByDay, 30),
   };
