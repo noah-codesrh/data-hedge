@@ -2,7 +2,14 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { createPublicClient, fallback, http, type Hex } from "viem";
+import {
+  createPublicClient,
+  decodeEventLog,
+  fallback,
+  http,
+  parseAbi,
+  type Hex,
+} from "viem";
 import { LEVERAGE_MARKETS } from "./leverage-markets";
 import { APP } from "./links";
 import {
@@ -26,6 +33,13 @@ const ORACLE = "0x19E7bd8d16b5D8dD1b619da5a791e6a04fFd3461";
 const ENGINE = "0xF29f50cf06ac63A834f68B8b0820D0d82f24B43A";
 const VAULT = "0xa60026C9f5a217730Bb647a5b8eA2aAEAb32a558";
 const STOCK = "0xFDD4FA8985D6FC2F4818a5Bc9f27C62228Ab6746";
+
+const vaultFlowAbi = parseAbi([
+  "event SeniorDeposit(address indexed lp, uint256 assets, uint256 shares)",
+  "event SeniorWithdraw(address indexed lp, uint256 assets, uint256 shares)",
+  "event JuniorDeposit(address indexed from, uint256 assets)",
+  "event JuniorWithdraw(address indexed to, uint256 assets)",
+]);
 
 const vaultAbi = [
   {
@@ -118,7 +132,10 @@ function explorerTx(hash: string) {
 
 async function jsonGet(url: string, ms = 8_000) {
   const res = await fetch(url, {
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "HedgeData/1.0",
+    },
     signal: AbortSignal.timeout(ms),
   });
   if (!res.ok) throw new Error(`${url} ${res.status}`);
@@ -491,6 +508,222 @@ async function loadEarnSeries(currentTvl: number): Promise<SeriesPoint[]> {
   }
 }
 
+type ExplorerLog = {
+  topics?: unknown[];
+  data?: string;
+  timestamp?: string;
+  decoded?: {
+    method_call?: string;
+    parameters?: Array<{ name?: string; value?: string }>;
+  };
+};
+
+function emptyVaultFlow() {
+  return {
+    deposits: 0,
+    withdrawals: 0,
+    total: 0,
+    txs: 0,
+    series: fillDaily(new Map(), 30, "carry"),
+  };
+}
+
+function usdgFromAssets(value: unknown) {
+  if (typeof value === "bigint") return Number(value) / 1_000_000;
+  if (typeof value === "number" && Number.isFinite(value)) return value / 1_000_000;
+  if (typeof value === "string" && value.length > 0) {
+    try {
+      return Number(BigInt(value)) / 1_000_000;
+    } catch {
+      return 0;
+    }
+  }
+  return 0;
+}
+
+function vaultFlowFromLog(row: ExplorerLog): {
+  kind: "deposit" | "withdraw";
+  assets: number;
+  day: string;
+} | null {
+  const topics = (row.topics ?? []).filter(
+    (topic): topic is Hex => typeof topic === "string" && topic.startsWith("0x"),
+  );
+  if (topics.length > 0) {
+    try {
+      const parsed = decodeEventLog({
+        abi: vaultFlowAbi,
+        data: ((row.data && row.data.length > 2 ? row.data : "0x") as Hex),
+        topics: topics as [Hex, ...Hex[]],
+      });
+      if (
+        parsed.eventName === "SeniorDeposit" ||
+        parsed.eventName === "JuniorDeposit" ||
+        parsed.eventName === "SeniorWithdraw" ||
+        parsed.eventName === "JuniorWithdraw"
+      ) {
+        const assets = usdgFromAssets(
+          (parsed.args as { assets?: bigint }).assets,
+        );
+        if (assets > 0) {
+          return {
+            kind:
+              parsed.eventName === "SeniorDeposit" ||
+              parsed.eventName === "JuniorDeposit"
+                ? "deposit"
+                : "withdraw",
+            assets,
+            day: dayKey(row.timestamp ?? ""),
+          };
+        }
+      }
+    } catch {
+      /* try Blockscout decoded fields */
+    }
+  }
+
+  const call = row.decoded?.method_call ?? "";
+  const assets = usdgFromAssets(
+    row.decoded?.parameters?.find((param) => param.name === "assets")?.value,
+  );
+  if (assets <= 0) return null;
+  if (call.startsWith("SeniorDeposit") || call.startsWith("JuniorDeposit")) {
+    return { kind: "deposit", assets, day: dayKey(row.timestamp ?? "") };
+  }
+  if (call.startsWith("SeniorWithdraw") || call.startsWith("JuniorWithdraw")) {
+    return { kind: "withdraw", assets, day: dayKey(row.timestamp ?? "") };
+  }
+  return null;
+}
+
+function accumulateVaultFlow(
+  events: Array<{ kind: "deposit" | "withdraw"; assets: number; day: string }>,
+) {
+  let deposits = 0;
+  let withdrawals = 0;
+  const daily = new Map<string, number>();
+  for (const event of events) {
+    if (event.kind === "deposit") deposits += event.assets;
+    else withdrawals += event.assets;
+    if (event.day.length === 10) {
+      daily.set(event.day, (daily.get(event.day) ?? 0) + event.assets);
+    }
+  }
+  const cumulative = new Map<string, number>();
+  let acc = 0;
+  for (const day of [...daily.keys()].sort()) {
+    acc += daily.get(day) ?? 0;
+    cumulative.set(day, acc);
+  }
+  return {
+    deposits,
+    withdrawals,
+    total: deposits + withdrawals,
+    txs: events.length,
+    series: fillDaily(cumulative, 30, "carry"),
+  };
+}
+
+async function loadVaultFlowFromExplorer() {
+  const items: ExplorerLog[] = [];
+  let url = `${RH_EXPLORER}/api/v2/addresses/${VAULT}/logs`;
+  for (let page = 0; page < 20; page += 1) {
+    const raw = (await jsonGet(url, 12_000)) as {
+      items?: ExplorerLog[];
+      next_page_params?: Record<string, unknown> | null;
+    };
+    items.push(...(raw.items ?? []));
+    const next = raw.next_page_params;
+    if (!next) break;
+    url = `${RH_EXPLORER}/api/v2/addresses/${VAULT}/logs?${new URLSearchParams(
+      Object.entries(next).map(([key, value]) => [key, String(value)]),
+    )}`;
+  }
+  const events = items
+    .map(vaultFlowFromLog)
+    .filter((row): row is NonNullable<typeof row> => Boolean(row));
+  if (events.length === 0) throw new Error("no vault flow logs");
+  return accumulateVaultFlow(events);
+}
+
+const VAULT_FROM_BLOCK = 47_490_000n;
+const LOG_CHUNK = 1_000_000n;
+const BLOCK_SECONDS = 2;
+const VAULT_FLOW_CACHE_MS = 5 * 60_000;
+let vaultFlowCache: { at: number; body: ReturnType<typeof accumulateVaultFlow> } | null =
+  null;
+
+async function loadVaultFlowFromRpc() {
+  const client = createPublicClient({
+    transport: fallback([
+      http(RH_RPC, { timeout: 20_000 }),
+      http(RH_RPC_FALLBACK, { timeout: 20_000 }),
+    ]),
+  });
+  const latest = await client.getBlockNumber();
+  const latestBlock = await client.getBlock({ blockNumber: latest });
+  const latestTs = Number(latestBlock.timestamp);
+
+  const ranges: Array<[bigint, bigint]> = [];
+  for (let from = VAULT_FROM_BLOCK; from <= latest; from += LOG_CHUNK + 1n) {
+    ranges.push([from, from + LOG_CHUNK > latest ? latest : from + LOG_CHUNK]);
+  }
+
+  const chunks = await Promise.all(
+    ranges.map(([from, to]) =>
+      client.getContractEvents({
+        address: VAULT as Hex,
+        abi: vaultFlowAbi,
+        fromBlock: from,
+        toBlock: to,
+        strict: true,
+      }),
+    ),
+  );
+
+  const events = chunks.flat().flatMap((log) => {
+    const assets = usdgFromAssets((log.args as { assets?: bigint }).assets);
+    if (assets <= 0) return [];
+    const day = new Date(
+      (latestTs - Number(latest - log.blockNumber) * BLOCK_SECONDS) * 1000,
+    )
+      .toISOString()
+      .slice(0, 10);
+    return [
+      {
+        kind:
+          log.eventName === "SeniorDeposit" || log.eventName === "JuniorDeposit"
+            ? ("deposit" as const)
+            : ("withdraw" as const),
+        assets,
+        day,
+      },
+    ];
+  });
+  return accumulateVaultFlow(events);
+}
+
+async function loadVaultFlow() {
+  if (
+    vaultFlowCache &&
+    Date.now() - vaultFlowCache.at < VAULT_FLOW_CACHE_MS
+  ) {
+    return vaultFlowCache.body;
+  }
+  let body = emptyVaultFlow();
+  try {
+    body = await loadVaultFlowFromRpc();
+  } catch {
+    try {
+      body = await loadVaultFlowFromExplorer();
+    } catch {
+      body = emptyVaultFlow();
+    }
+  }
+  vaultFlowCache = { at: Date.now(), body };
+  return body;
+}
+
 function parseJson<T>(value: unknown, fallback: T): T {
   if (value == null) return fallback;
   if (typeof value !== "string") return value as T;
@@ -581,13 +814,15 @@ function contracts() {
 export async function loadProtocolData(): Promise<ProtocolData> {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.body;
 
-  const [counts, vault, listed, burns, leveragedMarkets] = await Promise.all([
-    loadUsersAndVolume(),
-    readVault(),
-    loadMarkets(),
-    loadBurns(),
-    loadLeverageMarkets(),
-  ]);
+  const [counts, vault, listed, burns, leveragedMarkets, vaultFlow] =
+    await Promise.all([
+      loadUsersAndVolume(),
+      readVault(),
+      loadMarkets(),
+      loadBurns(),
+      loadLeverageMarkets(),
+      loadVaultFlow(),
+    ]);
   const earnSeries = await loadEarnSeries(vault?.tvl ?? 0);
 
   const body: ProtocolData = {
@@ -602,6 +837,13 @@ export async function loadProtocolData(): Promise<ProtocolData> {
     marketSeries: listed.marketSeries,
     markets: listed.markets,
     earnSeries,
+    vaultFlow: {
+      deposits: vaultFlow.deposits,
+      withdrawals: vaultFlow.withdrawals,
+      total: vaultFlow.total,
+      txs: vaultFlow.txs,
+    },
+    vaultFlowSeries: vaultFlow.series,
     burnSeries: burns.burnSeries,
     buybackSeries: burns.buybackSeries,
     buybackTotal: burns.buybackTotal,

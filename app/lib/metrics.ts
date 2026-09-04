@@ -43,6 +43,13 @@ export type ProtocolData = {
     senior: number;
     junior: number;
   } | null;
+  vaultFlow: {
+    deposits: number;
+    withdrawals: number;
+    total: number;
+    txs: number;
+  };
+  vaultFlowSeries: SeriesPoint[];
   keeper: {
     healthy: boolean;
     moving: boolean;

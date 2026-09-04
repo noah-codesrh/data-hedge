@@ -92,7 +92,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
         </p>
       </header>
 
-      <div className="grid gap-5 sm:grid-cols-2">
+      <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard
           value={fmt(d.requests)}
           label="Requests"
@@ -102,6 +102,22 @@ export default function Home({ loaderData }: Route.ComponentProps) {
           value={d.vault ? `$${fmt(d.vault.tvl)}` : "n/a"}
           label="Earn TVL"
           href={VAULT_EXPLORER}
+        />
+        <StatCard
+          value={`$${fmt(d.vaultFlow?.total ?? 0)}`}
+          label="Pool volume"
+          href={VAULT_EXPLORER}
+        />
+      </div>
+
+      <div className="mt-10">
+        <StippleArea
+          title="Pool volume"
+          hint={`Deposits $${fmt(d.vaultFlow?.deposits ?? 0)} · Withdrawals $${fmt(d.vaultFlow?.withdrawals ?? 0)}`}
+          value={`$${fmt(d.vaultFlow?.total ?? 0)}`}
+          href={VAULT_EXPLORER}
+          points={d.vaultFlowSeries ?? []}
+          height={300}
         />
       </div>
 
