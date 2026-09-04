@@ -105,17 +105,6 @@ export default function Home({ loaderData }: Route.ComponentProps) {
         />
       </div>
 
-      <div className="mt-10">
-        <StippleArea
-          title="Total volume"
-          hint="Since launch, 26 Aug"
-          value={`$${fmt(d.volumeShown)}`}
-          href={APP}
-          points={d.volumeSeries}
-          height={320}
-        />
-      </div>
-
       <div className="mt-10 grid gap-8 lg:grid-cols-2">
         <StippleArea
           title="Total users"
