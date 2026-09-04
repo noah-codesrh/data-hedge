@@ -105,14 +105,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
         />
       </div>
 
-      <div className="mt-10 grid gap-8 lg:grid-cols-2">
-        <StippleArea
-          title="Total users"
-          hint="Accounts on Hedge"
-          value={fmt(d.usersShown)}
-          href={APP}
-          points={d.userSeries}
-        />
+      <div className="mt-10">
         <StippleArea
           title="Total markets"
           hint="Live markets available"
